@@ -55,7 +55,11 @@ def db_summary() -> dict:
 def main() -> None:
     OUTPUT_DIR.mkdir(exist_ok=True)
     s = db_summary()
-    now_paris = datetime.now(ZoneInfo("Europe/Paris")).strftime("%d/%m/%Y à %H:%M")
+    now_paris_dt = datetime.now(ZoneInfo("Europe/Paris"))
+    now_paris = now_paris_dt.strftime("%d/%m/%Y à %H:%M")
+    # Version unique appendée à chaque ressource (?v=...) pour forcer le
+    # navigateur à recharger les fichiers à chaque nouvelle génération.
+    version = now_paris_dt.strftime("%Y%m%d%H%M%S")
 
     if s["count"] == 0:
         body = "<p>Pas encore de données. Patientez quelques heures !</p>"
@@ -86,21 +90,21 @@ def main() -> None:
 
         <h2>Heatmap : jour de la semaine × heure</h2>
         <p>La donnée la plus utile : couleur = affluence moyenne, chiffre = pourcentage.</p>
-        <img src="heatmap_jour_heure.png" alt="Heatmap" />
+        <img src="heatmap_jour_heure.png?v={version}" alt="Heatmap" />
 
         <h2>Affluence moyenne par heure</h2>
-        <img src="moyenne_par_heure.png" alt="Moyenne par heure" />
+        <img src="moyenne_par_heure.png?v={version}" alt="Moyenne par heure" />
 
         <h2>Affluence moyenne par jour</h2>
-        <img src="moyenne_par_jour.png" alt="Moyenne par jour" />
+        <img src="moyenne_par_jour.png?v={version}" alt="Moyenne par jour" />
 
         <h2>Toutes les mesures dans le temps</h2>
-        <img src="timeline_brute.png" alt="Timeline" />
+        <img src="timeline_brute.png?v={version}" alt="Timeline" />
 
         <h2>Données brutes</h2>
         <p>
-          <a href="donnees_brutes.csv" download>📥 Télécharger les données brutes (CSV)</a><br>
-          <a href="statistiques_par_creneau.csv" download>📥 Télécharger les stats par créneau (CSV)</a>
+          <a href="donnees_brutes.csv?v={version}" download>📥 Télécharger les données brutes (CSV)</a><br>
+          <a href="statistiques_par_creneau.csv?v={version}" download>📥 Télécharger les stats par créneau (CSV)</a>
         </p>
         """
 
@@ -110,6 +114,9 @@ def main() -> None:
 <meta charset="utf-8">
 <title>Affluence Caliceo Lieusaint</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <style>
   body {{
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
