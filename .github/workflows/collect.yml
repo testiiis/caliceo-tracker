@@ -2,10 +2,14 @@ name: Collecte affluence Caliceo
 
 # Déclencheurs
 on:
-  # Exécution programmée : toutes les heures, à la minute 5 (HH:05)
-  # On évite HH:00 car GitHub a parfois du retard sur l'heure pile.
+  # Planification redondante : 2 tentatives par heure pour maximiser
+  # les chances que GitHub Actions exécute bien le job (les jobs cron
+  # peuvent être retardés ou sautés en cas de forte charge sur GitHub).
+  # On choisit des minutes "exotiques" pour éviter les heures rondes
+  # massivement utilisées par les autres utilisateurs GitHub.
   schedule:
-    - cron: '5 * * * *'
+    - cron: '17 * * * *'   # toutes les heures à HH:17
+    - cron: '47 * * * *'   # toutes les heures à HH:47
 
   # Permet de déclencher manuellement depuis l'onglet Actions de GitHub
   workflow_dispatch:
@@ -13,6 +17,11 @@ on:
 # Permissions nécessaires pour que le workflow puisse commit la base mise à jour
 permissions:
   contents: write
+
+# Évite que deux runs se marchent dessus (push concurrents)
+concurrency:
+  group: 'collect'
+  cancel-in-progress: false
 
 jobs:
   collect:
@@ -34,10 +43,43 @@ jobs:
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
+      - name: Vérifier si une mesure existe déjà cette heure
+        id: dedupe
+        run: |
+          # On ne veut pas plusieurs mesures dans la même heure si les
+          # 2 crons (HH:17 et HH:47) tournent tous les deux. Si la dernière
+          # mesure date de la même heure (Paris), on saute.
+          HOUR_KEY=$(TZ='Europe/Paris' date '+%Y-%m-%d %H')
+          if [ -f data.sqlite ]; then
+            LAST_TS=$(python3 -c "
+          import sqlite3
+          try:
+              c = sqlite3.connect('data.sqlite')
+              row = c.execute('SELECT timestamp FROM attendance ORDER BY id DESC LIMIT 1').fetchone()
+              print(row[0] if row else '')
+          except Exception:
+              print('')
+          " 2>/dev/null || echo "")
+            LAST_HOUR=$(echo "$LAST_TS" | cut -c1-13 | tr 'T' ' ')
+            echo "Dernière mesure : $LAST_TS"
+            echo "Heure actuelle  : $HOUR_KEY"
+            if [ "$LAST_HOUR" = "$HOUR_KEY" ]; then
+              echo "Une mesure existe déjà dans cette heure, on saute."
+              echo "skip=true" >> $GITHUB_OUTPUT
+            else
+              echo "skip=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "Pas encore de base, on collecte."
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Lancer la collecte
+        if: steps.dedupe.outputs.skip != 'true'
         run: python collect.py
 
       - name: Vérifier les heures d'ouverture (Europe/Paris)
+        if: steps.dedupe.outputs.skip != 'true'
         id: opening
         run: |
           # On ne commit que pendant les heures d'ouverture du spa
@@ -55,12 +97,13 @@ jobs:
           fi
 
       - name: Commit & push de la base mise à jour
-        if: steps.opening.outputs.should_commit == 'true'
+        if: steps.dedupe.outputs.skip != 'true' && steps.opening.outputs.should_commit == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Pull avant de push pour éviter les conflits si un autre run est passé
+          git pull --rebase --autostash origin main || true
           git add data.sqlite
-          # Commit seulement si la base a changé
           if ! git diff --staged --quiet; then
             git commit -m "Affluence: $(TZ='Europe/Paris' date '+%Y-%m-%d %H:%M %Z')"
             git push
