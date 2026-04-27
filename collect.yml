@@ -1,0 +1,69 @@
+name: Collecte affluence Caliceo
+
+# Déclencheurs
+on:
+  # Exécution programmée : toutes les heures, à la minute 5 (HH:05)
+  # On évite HH:00 car GitHub a parfois du retard sur l'heure pile.
+  schedule:
+    - cron: '5 * * * *'
+
+  # Permet de déclencher manuellement depuis l'onglet Actions de GitHub
+  workflow_dispatch:
+
+# Permissions nécessaires pour que le workflow puisse commit la base mise à jour
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Récupérer le code du repo
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Installer les dépendances
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Lancer la collecte
+        run: python collect.py
+
+      - name: Vérifier les heures d'ouverture (Europe/Paris)
+        id: opening
+        run: |
+          # On ne commit que pendant les heures d'ouverture du spa
+          # pour éviter de polluer l'historique avec des "0%" inutiles.
+          HOUR=$(TZ='Europe/Paris' date +%H)
+          DOW=$(TZ='Europe/Paris' date +%u)  # 1=lundi, 7=dimanche
+          echo "Heure Paris: $HOUR, jour: $DOW"
+          # Spa ouvert 10h-22h (10h-23h ven=5/sam=6)
+          if [ "$HOUR" -ge 10 ] && [ "$HOUR" -le 22 ]; then
+            echo "should_commit=true" >> $GITHUB_OUTPUT
+          elif { [ "$DOW" = "5" ] || [ "$DOW" = "6" ]; } && [ "$HOUR" = "23" ]; then
+            echo "should_commit=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_commit=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit & push de la base mise à jour
+        if: steps.opening.outputs.should_commit == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data.sqlite
+          # Commit seulement si la base a changé
+          if ! git diff --staged --quiet; then
+            git commit -m "Affluence: $(TZ='Europe/Paris' date '+%Y-%m-%d %H:%M %Z')"
+            git push
+          else
+            echo "Aucun changement à committer."
+          fi
