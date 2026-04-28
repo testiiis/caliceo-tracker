@@ -2,23 +2,27 @@ name: Collecte affluence Caliceo
 
 # Déclencheurs
 on:
-  # Planification redondante : 2 tentatives par heure pour maximiser
-  # les chances que GitHub Actions exécute bien le job (les jobs cron
-  # peuvent être retardés ou sautés en cas de forte charge sur GitHub).
-  # On choisit des minutes "exotiques" pour éviter les heures rondes
-  # massivement utilisées par les autres utilisateurs GitHub.
+  # 3 tentatives par heure pour absorber les retards de GitHub Actions
+  # (les jobs cron peuvent être retardés de 5-30 min en cas de charge).
+  # Le système de déduplication s'assure qu'on n'enregistre qu'UNE
+  # mesure par heure pleine.
   schedule:
-    - cron: '17 * * * *'   # toutes les heures à HH:17
-    - cron: '47 * * * *'   # toutes les heures à HH:47
+    - cron: '7 * * * *'    # HH:07
+    - cron: '27 * * * *'   # HH:27
+    - cron: '47 * * * *'   # HH:47
 
-  # Permet de déclencher manuellement depuis l'onglet Actions de GitHub
+  # Déclenchement manuel avec option pour forcer la collecte
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Forcer la collecte (ignorer la déduplication)"
+        type: boolean
+        default: false
 
-# Permissions nécessaires pour que le workflow puisse commit la base mise à jour
 permissions:
   contents: write
 
-# Évite que deux runs se marchent dessus (push concurrents)
+# Empêche deux runs simultanés (évite les conflits de push)
 concurrency:
   group: 'collect'
   cancel-in-progress: false
@@ -32,76 +36,103 @@ jobs:
       - name: Récupérer le code du repo
         uses: actions/checkout@v4
 
+      # ============================================================
+      # ÉTAPE 1 : Vérifier si on doit collecter (heure d'ouverture +
+      # pas déjà fait pour cette heure pleine)
+      # ============================================================
+      - name: Décider si on collecte
+        id: gate
+        run: |
+          # --- Forçage manuel ---
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            echo "🔓 Collecte forcée par l'utilisateur."
+            echo "skip=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # --- Heure et jour locaux (Paris) ---
+          HOUR=$(TZ='Europe/Paris' date +%H)
+          DOW=$(TZ='Europe/Paris' date +%u)   # 1=lundi ... 7=dimanche
+          HOUR_KEY=$(TZ='Europe/Paris' date '+%Y-%m-%d %H')
+          HOUR_INT=$((10#$HOUR))              # convertit "07" en 7
+          echo "📅 Maintenant (Paris) : jour=$DOW heure=$HOUR_INT clé=$HOUR_KEY"
+
+          # --- Filtre heures d'ouverture du spa ---
+          # Lundi-jeudi & dimanche : 10h-22h (heures pleines 10..21)
+          # Vendredi & samedi      : 10h-23h (heures pleines 10..22)
+          IS_OPEN=false
+          if [ "$HOUR_INT" -ge 10 ] && [ "$HOUR_INT" -le 21 ]; then
+            IS_OPEN=true
+          elif [ "$HOUR_INT" -eq 22 ] && { [ "$DOW" = "5" ] || [ "$DOW" = "6" ]; }; then
+            IS_OPEN=true
+          fi
+
+          if [ "$IS_OPEN" != "true" ]; then
+            echo "🌙 Spa fermé à cette heure, on ne collecte pas."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # --- Déduplication : a-t-on déjà une mesure pour cette heure pleine ? ---
+          if [ -f data.sqlite ]; then
+            ALREADY=$(python3 -c "
+          import sqlite3
+          try:
+              c = sqlite3.connect('data.sqlite')
+              row = c.execute(
+                  \"SELECT timestamp FROM attendance WHERE substr(timestamp,1,13) = ? LIMIT 1\",
+                  ('${HOUR_KEY}T'.replace(' ', 'T'),)
+              ).fetchone()
+              # Note : timestamp est ISO type '2026-04-27T14:07:33+02:00'
+              # substr 1..13 = '2026-04-27T14' qu'on compare à 'YYYY-MM-DDTHH'
+              print('yes' if row else 'no')
+          except Exception as e:
+              print('no')
+          ")
+            if [ "$ALREADY" = "yes" ]; then
+              echo "✅ Mesure déjà présente pour l'heure $HOUR_KEY, on saute."
+              echo "skip=true" >> $GITHUB_OUTPUT
+            else
+              echo "🆕 Pas encore de mesure pour $HOUR_KEY, on collecte."
+              echo "skip=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "🆕 Base vide, on collecte."
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ============================================================
+      # ÉTAPE 2 : Installation Python + Playwright (uniquement si on collecte)
+      # ============================================================
       - name: Installer Python
+        if: steps.gate.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
       - name: Installer les dépendances
+        if: steps.gate.outputs.skip != 'true'
         run: |
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
-      - name: Vérifier si une mesure existe déjà cette heure
-        id: dedupe
-        run: |
-          # On ne veut pas plusieurs mesures dans la même heure si les
-          # 2 crons (HH:17 et HH:47) tournent tous les deux. Si la dernière
-          # mesure date de la même heure (Paris), on saute.
-          HOUR_KEY=$(TZ='Europe/Paris' date '+%Y-%m-%d %H')
-          if [ -f data.sqlite ]; then
-            LAST_TS=$(python3 -c "
-          import sqlite3
-          try:
-              c = sqlite3.connect('data.sqlite')
-              row = c.execute('SELECT timestamp FROM attendance ORDER BY id DESC LIMIT 1').fetchone()
-              print(row[0] if row else '')
-          except Exception:
-              print('')
-          " 2>/dev/null || echo "")
-            LAST_HOUR=$(echo "$LAST_TS" | cut -c1-13 | tr 'T' ' ')
-            echo "Dernière mesure : $LAST_TS"
-            echo "Heure actuelle  : $HOUR_KEY"
-            if [ "$LAST_HOUR" = "$HOUR_KEY" ]; then
-              echo "Une mesure existe déjà dans cette heure, on saute."
-              echo "skip=true" >> $GITHUB_OUTPUT
-            else
-              echo "skip=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "Pas encore de base, on collecte."
-            echo "skip=false" >> $GITHUB_OUTPUT
-          fi
-
+      # ============================================================
+      # ÉTAPE 3 : Collecte
+      # ============================================================
       - name: Lancer la collecte
-        if: steps.dedupe.outputs.skip != 'true'
+        if: steps.gate.outputs.skip != 'true'
         run: python collect.py
 
-      - name: Vérifier les heures d'ouverture (Europe/Paris)
-        if: steps.dedupe.outputs.skip != 'true'
-        id: opening
-        run: |
-          # On ne commit que pendant les heures d'ouverture du spa
-          # pour éviter de polluer l'historique avec des "0%" inutiles.
-          HOUR=$(TZ='Europe/Paris' date +%H)
-          DOW=$(TZ='Europe/Paris' date +%u)  # 1=lundi, 7=dimanche
-          echo "Heure Paris: $HOUR, jour: $DOW"
-          # Spa ouvert 10h-22h (10h-23h ven=5/sam=6)
-          if [ "$HOUR" -ge 10 ] && [ "$HOUR" -le 22 ]; then
-            echo "should_commit=true" >> $GITHUB_OUTPUT
-          elif { [ "$DOW" = "5" ] || [ "$DOW" = "6" ]; } && [ "$HOUR" = "23" ]; then
-            echo "should_commit=true" >> $GITHUB_OUTPUT
-          else
-            echo "should_commit=false" >> $GITHUB_OUTPUT
-          fi
-
+      # ============================================================
+      # ÉTAPE 4 : Commit & push
+      # ============================================================
       - name: Commit & push de la base mise à jour
-        if: steps.dedupe.outputs.skip != 'true' && steps.opening.outputs.should_commit == 'true'
+        if: steps.gate.outputs.skip != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Pull avant de push pour éviter les conflits si un autre run est passé
+          # Synchronise avec le distant pour éviter les conflits de push
           git pull --rebase --autostash origin main || true
           git add data.sqlite
           if ! git diff --staged --quiet; then
