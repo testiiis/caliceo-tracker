@@ -70,6 +70,8 @@ def load_dataframe() -> pd.DataFrame:
 
 def heatmap_weekday_hour(df: pd.DataFrame, path: Path) -> None:
     """Heatmap moyenne d'affluence par (jour de semaine, heure)."""
+    from matplotlib.colors import LinearSegmentedColormap, BoundaryNorm
+
     open_df = df[df["is_open"]].copy()
     if open_df.empty:
         print("Pas assez de données ouvertes pour la heatmap.")
@@ -82,8 +84,31 @@ def heatmap_weekday_hour(df: pd.DataFrame, path: Path) -> None:
         .reindex(index=range(7), columns=range(10, 24))
     )
 
+    # Échelle de couleurs personnalisée :
+    #   0%     → vert foncé (idéal, peu de monde)
+    #   35%    → vert clair / jaune (toujours confortable)
+    #   45%    → orange (commence à se remplir)
+    #   55%    → rouge (chargé)
+    #   100%   → rouge foncé (saturé)
+    # On définit explicitement les points pour que les transitions soient
+    # cohérentes avec le ressenti utilisateur.
+    color_stops = [
+        (0.00, "#1a7a3e"),  # vert foncé
+        (0.25, "#5cb85c"),  # vert
+        (0.35, "#a8d96b"),  # vert-jaune (frontière "confortable")
+        (0.45, "#ffd24a"),  # jaune-orange
+        (0.55, "#f08030"),  # orange-rouge (frontière "chargé")
+        (0.70, "#d9534f"),  # rouge
+        (1.00, "#8b1a1a"),  # rouge foncé
+    ]
+    cmap = LinearSegmentedColormap.from_list(
+        "affluence",
+        color_stops,
+        N=256,
+    )
+
     fig, ax = plt.subplots(figsize=(13, 5.5))
-    im = ax.imshow(pivot.values, aspect="auto", cmap="RdYlGn_r", vmin=0, vmax=100)
+    im = ax.imshow(pivot.values, aspect="auto", cmap=cmap, vmin=0, vmax=100)
 
     ax.set_xticks(range(len(pivot.columns)))
     ax.set_xticklabels([f"{h}h" for h in pivot.columns])
@@ -93,7 +118,7 @@ def heatmap_weekday_hour(df: pd.DataFrame, path: Path) -> None:
     ax.set_ylabel("Jour de la semaine")
     ax.set_title("Affluence moyenne (%) — Caliceo Lieusaint")
 
-    # Annotations dans les cases
+    # Annotations dans les cases (texte blanc dès qu'on entre dans l'orange)
     for i in range(pivot.shape[0]):
         for j in range(pivot.shape[1]):
             v = pivot.values[i, j]
@@ -101,12 +126,16 @@ def heatmap_weekday_hour(df: pd.DataFrame, path: Path) -> None:
                 ax.text(
                     j, i, f"{v:.0f}",
                     ha="center", va="center",
-                    color="white" if v > 55 else "black",
+                    color="white" if v >= 45 else "black",
                     fontsize=9,
+                    fontweight="bold",
                 )
 
-    cbar = fig.colorbar(im, ax=ax)
+    cbar = fig.colorbar(im, ax=ax, ticks=[0, 20, 35, 45, 55, 70, 85, 100])
     cbar.set_label("Affluence moyenne (%)")
+    cbar.ax.set_yticklabels(
+        ["0%", "20%", "35%\n(confort)", "45%", "55%\n(chargé)", "70%", "85%", "100%"]
+    )
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)
