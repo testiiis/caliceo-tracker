@@ -30,6 +30,24 @@ OUTPUT_DIR = Path(__file__).parent / "output"
 
 JOURS_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
 
+# Échelle de couleurs personnalisée :
+#   0%     → vert foncé (idéal, peu de monde)
+#   35%    → vert clair / jaune (toujours confortable)
+#   45%    → orange (commence à se remplir)
+#   55%    → rouge (chargé)
+#   100%   → rouge foncé (saturé)
+# On définit explicitement les points pour que les transitions soient
+# cohérentes avec le ressenti utilisateur.
+AFFLUENCE_CMAP_STOPS = [
+    (0.00, "#1a7a3e"),  # vert foncé
+    (0.25, "#5cb85c"),  # vert
+    (0.35, "#a8d96b"),  # vert-jaune (frontière "confortable")
+    (0.45, "#ffd24a"),  # jaune-orange
+    (0.55, "#f08030"),  # orange-rouge (frontière "chargé")
+    (0.70, "#d9534f"),  # rouge
+    (1.00, "#8b1a1a"),  # rouge foncé
+]
+
 
 def load_dataframe() -> pd.DataFrame:
     if not DB_PATH.exists():
@@ -84,26 +102,9 @@ def heatmap_weekday_hour(df: pd.DataFrame, path: Path) -> None:
         .reindex(index=range(7), columns=range(10, 24))
     )
 
-    # Échelle de couleurs personnalisée :
-    #   0%     → vert foncé (idéal, peu de monde)
-    #   35%    → vert clair / jaune (toujours confortable)
-    #   45%    → orange (commence à se remplir)
-    #   55%    → rouge (chargé)
-    #   100%   → rouge foncé (saturé)
-    # On définit explicitement les points pour que les transitions soient
-    # cohérentes avec le ressenti utilisateur.
-    color_stops = [
-        (0.00, "#1a7a3e"),  # vert foncé
-        (0.25, "#5cb85c"),  # vert
-        (0.35, "#a8d96b"),  # vert-jaune (frontière "confortable")
-        (0.45, "#ffd24a"),  # jaune-orange
-        (0.55, "#f08030"),  # orange-rouge (frontière "chargé")
-        (0.70, "#d9534f"),  # rouge
-        (1.00, "#8b1a1a"),  # rouge foncé
-    ]
     cmap = LinearSegmentedColormap.from_list(
         "affluence",
-        color_stops,
+        AFFLUENCE_CMAP_STOPS,
         N=256,
     )
 

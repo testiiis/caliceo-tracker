@@ -44,6 +44,11 @@ jobs:
       - name: Générer les graphiques
         run: python analyze.py
 
+      # Si la prévision échoue, le reste du tableau de bord est quand même publié.
+      - name: Calculer la prévision et les tendances
+        run: python forecast.py
+        continue-on-error: true
+
       - name: Construire la page web (index.html)
         run: python build_dashboard.py
 

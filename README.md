@@ -108,7 +108,9 @@ Tu y verras :
 - Le créneau le plus calme et le plus chargé
 - Une **heatmap** jour × heure (le graphique principal pour ton analyse)
 - Les courbes par heure et par jour
-- Des liens pour télécharger les **CSV** (données brutes + stats)
+- La **prévision d'affluence pour les 7 prochains jours** (voir plus bas)
+- Le **tableau d'affluence par mois** et les **tendances par saison**
+- Des liens pour télécharger les **CSV** (données brutes, stats, prévision, tableaux)
 
 La page se met à jour automatiquement chaque soir, ou immédiatement après chaque
 collecte (ça dépend de la charge GitHub, max 24h de délai).
@@ -129,6 +131,110 @@ Ouvre le CSV dans Excel ou Google Sheets et ajoute des colonnes :
 Puis fais des tableaux croisés dynamiques pour comparer les périodes.
 
 📅 **Calendrier vacances zone C** : https://www.education.gouv.fr/calendrier-scolaire
+
+---
+
+## 🔮 Modèle prévisionnel (`forecast.py`)
+
+`forecast.py` lit `data.sqlite` **en lecture seule** (la base n'est jamais
+modifiée) et prévoit l'affluence heure par heure pour les 7 prochains jours.
+
+### Préparation des données
+
+1. On ne garde que les heures d'ouverture.
+2. Une journée où toutes les mesures valent 0 % est une **fermeture**
+   (ex. arrêt technique) : elle est exclue.
+3. Un 0 % isolé en pleine journée est une **erreur de lecture** (le site
+   affiche 0 % avant de charger la vraie valeur) : exclu. À 10h, 0 % est
+   plausible (ouverture) : conservé.
+4. Plusieurs mesures dans la même heure (anciens doublons) sont moyennées :
+   **1 valeur par créneau** (date, heure).
+
+### Le modèle
+
+Une régression linéaire, c'est-à-dire une somme d'effets estimés sur
+l'historique :
+
+```
+affluence = moyenne
+          + effet du jour de la semaine
+          + effet de l'heure
+          + effet propre au couple jour×heure
+          + effet vacances scolaires zone C    (séparé semaine / week-end)
+          + effet jour férié ou pont
+```
+
+- **Effet jour×heure « rétréci » (régression ridge)** : chaque case jour×heure
+  n'a qu'une quinzaine de mesures. Plutôt que de croire aveuglément sa
+  moyenne, on la ramène vers le profil « jour + heure » ; elle ne s'en écarte
+  que si les données le justifient. Cela évite de prendre un samedi
+  exceptionnel pour une règle.
+- **Vacances séparées semaine / week-end** : les vacances remplissent surtout
+  les journées de semaine (le week-end, les gens sont déjà libres). Ce choix
+  réduit l'erreur de prévision d'environ 7 % en validation.
+- **Pondération des semaines récentes** : en option (demi-vie de 4, 8 ou 16
+  semaines, ou aucune) ; le meilleur réglage est choisi automatiquement.
+
+### Validation : comment sait-on que ça marche ?
+
+À chaque génération, le modèle est **re-testé sur les 6 dernières semaines** :
+pour chaque semaine, on l'entraîne uniquement sur ce qui précède et on compare
+sa prévision à ce qui a vraiment été mesuré. On compare son erreur moyenne à
+deux méthodes simples :
+
+- la moyenne historique du même créneau jour×heure ;
+- la valeur du même créneau la semaine précédente.
+
+Le réglage (pondération, force du rétrécissement) retenu est celui qui fait
+l'erreur la plus faible. Les résultats sont affichés sur le tableau de bord,
+y compris si le modèle ne fait pas mieux que les méthodes simples.
+
+### L'intervalle de prévision (80 %)
+
+Les erreurs observées pendant la validation donnent une fourchette : dans
+80 % des cas, l'erreur était comprise entre le 10ᵉ et le 90ᵉ centile. On
+ajoute cette fourchette à la prévision (sans supposer de loi normale).
+Le tableau de bord affiche aussi la part des cas où la vraie valeur était
+réellement dans la fourchette, mesurée sur des semaines qui n'ont pas servi à
+la construire.
+
+### Hypothèses
+
+1. **Le rythme hebdomadaire est stable** : un mardi 16h ressemble aux mardis
+   16h passés.
+2. **Les effets s'additionnent** : vacances et jours fériés ajoutent ou
+   retirent un nombre de points fixe, quelle que soit l'heure.
+3. **Toutes les vacances se ressemblent** : l'effet est appris surtout sur
+   le printemps et l'été, et appliqué aussi à la Toussaint, à Noël, etc.
+4. **La mesure de l'heure est représentative** : la valeur relevée entre
+   HH:07 et HH:47 vaut pour toute l'heure.
+5. **Les 0 %** sont traités comme décrit plus haut (erreur ou fermeture).
+6. **Horaires connus** : 10h-22h, 10h-23h vendredi et samedi ; les
+   fermetures exceptionnelles à venir ne sont pas connues du modèle.
+7. **Facteurs non observés** (météo, événements locaux, promotions,
+   travaux…) : non modélisés, ils font partie de l'incertitude.
+8. **Saisonnalité** : avec moins d'un an de données, la saison n'est pas une
+   variable du modèle (l'hiver n'a jamais été observé). Elle est en partie
+   captée par les vacances scolaires.
+9. **Calendrier scolaire** codé en dur dans `calendrier.py` (source
+   data.education.gouv.fr) : **à compléter chaque année** ; au-delà de la
+   dernière date connue, les jours sont considérés hors vacances et le
+   tableau de bord le signale.
+
+### Tableaux mensuel et saisonnier
+
+- **Moyenne brute** : moyenne des créneaux mesurés du mois.
+- **Moyenne ajustée** : moyenne générale + écart moyen du mois par rapport au
+  profil habituel de chaque créneau jour×heure. Elle corrige le fait que les
+  mois n'ont pas été mesurés aux mêmes heures (créneaux manquants, doublons).
+  **C'est elle qu'il faut comparer d'un mois à l'autre.**
+- **Saisons** : saisons astronomiques (20/03, 21/06, 22/09, 21/12), plus une
+  comparaison vacances scolaires / hors vacances. Ces tendances sont
+  descriptives et deviendront plus solides avec une année complète.
+
+Fichiers produits dans `output/` : `prevision_semaine.png`,
+`prevision_semaine.csv`, `affluence_par_mois.csv`, `tendances_saisons.csv`,
+`forecast_summary.json`.
 
 ---
 
@@ -154,6 +260,7 @@ avoir téléchargé `data.sqlite` depuis ton repo) :
 pip install -r requirements.txt
 playwright install chromium    # uniquement si tu veux aussi tester collect.py en local
 python analyze.py              # génère les graphiques dans output/
+python forecast.py             # prévision 7 jours + tableaux mois/saisons
 python build_dashboard.py      # génère output/index.html
 ```
 
@@ -169,6 +276,8 @@ caliceo-tracker/
 │       └── dashboard.yml       # Workflow de publication (tous les soirs)
 ├── collect.py                  # Script de collecte
 ├── analyze.py                  # Script d'analyse
+├── forecast.py                 # Prévision 7 jours + tableaux mois/saisons
+├── calendrier.py               # Vacances zone C, jours fériés, saisons
 ├── build_dashboard.py          # Génère la page HTML
 ├── requirements.txt            # Dépendances Python
 ├── README.md                   # Ce fichier
